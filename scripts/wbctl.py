@@ -282,6 +282,22 @@ def _proc_alive(pid: int) -> bool:
         return False
 
 
+def _pid_on_port(port: int) -> int | None:
+    """从 netstat 里捞出正在 LISTEN 该端口的 pid（pidfile 失效时的兜底）。"""
+    try:
+        r = subprocess.run(["netstat", "-ano"], capture_output=True, timeout=15)
+        text = (r.stdout or b"").decode("utf-8", "ignore")
+    except Exception:
+        return None
+    needle = "127.0.0.1:%d" % port
+    for line in text.splitlines():
+        if needle in line and "LISTENING" in line.upper():
+            parts = line.split()
+            if parts and parts[-1].isdigit():
+                return int(parts[-1])
+    return None
+
+
 def cmd_stop(args):
     port = conf_port(args.port)
     pid = None
@@ -299,7 +315,18 @@ def cmd_stop(args):
         time.sleep(1.5)
         out("[ok] 已停止网关（pid=%d）" % pid)
     elif health(port):
-        out("[!] 端口 %d 上还活着一个不是本脚本启动的网关，请手动结束它" % port)
+        fallback = _pid_on_port(port)
+        if fallback:
+            out("[i] pidfile 失效，按端口找到监听进程 %d，一并结束" % fallback)
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(fallback), "/T", "/F"], capture_output=True, timeout=20)
+            else:
+                import signal
+                os.kill(fallback, signal.SIGTERM)
+            time.sleep(1.5)
+            out("[ok] 已停止网关（pid=%d）" % fallback)
+        else:
+            out("[!] 端口 %d 上还活着一个网关，但找不到它的 pid，请手动结束" % port)
     else:
         out("[=] 网关没在运行")
     try:
