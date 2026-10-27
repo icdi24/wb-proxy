@@ -92,6 +92,22 @@ python scripts/wbctl.py stop && python scripts/wbctl.py start
 
 跨出口调模型会得到一句很清楚的 400：「模型 X 只在国内版提供，但当前 Key 绑定的是国际版出口」。
 
+**2b. 想让两家出口并存，别开两个网关 —— 加一个请求头就行。**
+网关支持按请求头 `X-Realm` 选出口，而 dsh 的 pi-ai provider 支持 `headers`：
+同一个 `baseURL`，第二个 provider 只多一个 `X-Realm: cn`，模型选择器里就是两组。
+
+```bash
+python scripts/two_exits.py            # 默认给 dsh 加 wb-cn（国内版），并把原 provider 改名为「WB 国际版」
+python scripts/two_exits.py --dry-run  # 只看要写什么
+```
+
+- 幂等：重复执行只重写 `wb-cn` 块，不动其它内容；写完用 YAML 校验，失败不落盘。
+- 国际版 11 个模型 + 国内版 18 个模型，互不覆盖；共有模型会出现两次，靠分组区分。
+- 默认跳过 `glm-5.1`：上游要求 reasoning effort，网关目录没申报，配了必 400。
+- **改完要重启 dsh**（provider 只在启动时加载）。
+- 国内版独有：`deepseek-v4-pro`、`minimax-m3`、`kimi-k3-1`、`kimi-k2.7`、`glm-5v-turbo`、
+  `step-5-preview`、`space-bunny`、`mimo-v2.6-pro`。
+
 **3. 目录里 24 个模型不代表 24 个能用。**
 非 PRO 账号调 `gpt-*` / `gemini-*` 一律 503。**用 `probe` 打真实请求判断**，
 它会把可用清单写到 `~/.wb-proxy/probe-ok.json`，`--apply-ok` 可顺手只把可用的写进客户端配置。
