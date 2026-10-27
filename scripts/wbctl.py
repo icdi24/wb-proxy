@@ -201,7 +201,8 @@ def cmd_doctor(args):
     out("下一步：python wbctl.py start")
 
 
-def spawn_gateway(port: int, api_key: str | None, panel_pw: str | None) -> int:
+def spawn_gateway(port: int, api_key: str | None, panel_pw: str | None,
+                  extra_env: dict | None = None) -> int:
     exe = sys.executable
     if os.name == "nt":
         cand = Path(exe).with_name("pythonw.exe")
@@ -215,8 +216,12 @@ def spawn_gateway(port: int, api_key: str | None, panel_pw: str | None) -> int:
         argv += ["--api-key", api_key]
     if panel_pw:
         argv += ["--panel-password", panel_pw]
+    env = os.environ.copy()
+    for k, v in (extra_env or {}).items():
+        env[str(k)] = str(v)
     fh = open(logfile, "ab")
-    kwargs = dict(cwd=str(HUB), stdin=subprocess.DEVNULL, stdout=fh, stderr=fh, close_fds=True)
+    kwargs = dict(cwd=str(HUB), stdin=subprocess.DEVNULL, stdout=fh, stderr=fh,
+                  close_fds=True, env=env)
     if os.name == "nt":
         kwargs["creationflags"] = (subprocess.DETACHED_PROCESS
                                    | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -242,8 +247,19 @@ def cmd_start(args):
         save_conf(conf)
     api_key = conf.get("api_key")
     panel_pw = conf.get("panel_password")
+    env = dict(conf.get("env") or {})
+    if getattr(args, "env", None):
+        for item in args.env:
+            if "=" not in item:
+                die("--env 要写成 KEY=VALUE：%s" % item)
+            k, v = item.split("=", 1)
+            env[k.strip()] = v.strip()
+        conf["env"] = env
+        save_conf(conf)
+    if env:
+        out("     环境变量：" + ", ".join("%s=%s" % (k, v) for k, v in env.items()))
     out("[*] 启动网关（%s，端口 %d）…" % (HUB, port))
-    pid = spawn_gateway(port, api_key, panel_pw)
+    pid = spawn_gateway(port, api_key, panel_pw, env)
     deadline = time.time() + 90
     last_note = 0.0
     while time.time() < deadline:
@@ -555,7 +571,10 @@ def main():
         return p
 
     add("doctor", cmd_doctor, "环境自检")
-    add("start", cmd_start, "启动网关（后台常驻）")
+    p = add("start", cmd_start, "启动网关（后台常驻）")
+    p.add_argument("--env", action="append", metavar="KEY=VALUE",
+                   help="给网关进程加环境变量，可重复；会持久化到 config.json（如 "
+                        "WB_MAX_PAYLOAD_BYTES=67108864 抬高请求体上限）")
     add("stop", cmd_stop, "停止网关")
     add("status", cmd_status, "查看状态/账号/模型").add_argument(
         "--refresh", action="store_true", help="顺便刷新各账号积分")
