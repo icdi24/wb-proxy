@@ -639,15 +639,32 @@ def cmd_install_task(args):
     if conf.get("panel_password"):
         argv += ["--panel-password", str(conf["panel_password"])]
 
+    # 环境变量（如 WB_MAX_PAYLOAD_BYTES）必须写进 runner：计划任务由任务计划
+    # 程序拉起，不继承任何 shell 的环境，只靠这里的 set 行。与 start 的 --env
+    # 同一套配置源（config.json 的 env），并允许本次用 --env 追加/覆盖后回写。
+    env = dict(conf.get("env") or {})
+    if getattr(args, "env", None):
+        for item in args.env:
+            if "=" not in item:
+                die("--env 要写成 KEY=VALUE：%s" % item)
+            k, v = item.split("=", 1)
+            env[k.strip()] = v.strip()
+        conf["env"] = env
+        save_conf(conf)
+    env_lines = ['set "%s=%s"' % (k, v) for k, v in env.items()]
+
     runner = _runner_path()
     logfile = LOGDIR / "gateway.log"
-    runner.write_text("\r\n".join([
-        "@echo off",
-        "rem 由 wbctl.py install-task 生成；登录时计划任务 %s 调用本文件。" % TASK_NAME,
-        "rem 改这里不会生效 —— 改 wbctl.py 后重新 install-task。",
-        'cd /d "%s"' % HUB,
-        '"%s" >> "%s" 2>&1' % ('" "'.join(argv), logfile),
-    ]) + "\r\n", encoding="utf-8")
+    runner.write_text("\r\n".join(
+        ["@echo off",
+         "rem 由 wbctl.py install-task 生成；登录时计划任务 %s 调用本文件。" % TASK_NAME,
+         "rem 改这里不会生效 —— 改 wbctl.py 后重新 install-task。",
+         'cd /d "%s"' % HUB]
+        + env_lines
+        + ['"%s" >> "%s" 2>&1' % ('" "'.join(argv), logfile)]
+    ) + "\r\n", encoding="utf-8")
+    if env:
+        out("[*] 环境变量（写入 runner）：" + ", ".join("%s=%s" % (k, v) for k, v in env.items()))
     out("[*] 启动脚本：%s" % runner)
     out("[*] 日志追加：%s" % logfile)
     if conf.get("api_key"):
@@ -741,7 +758,9 @@ def main():
     p = add("logs", cmd_logs, "看网关日志")
     p.add_argument("--lines", type=int, default=40)
     add("upgrade", cmd_upgrade, "同步 upstream 到运行目录")
-    add("install-task", cmd_install_task, "注册登录自启计划任务（Windows 常驻）")
+    p = add("install-task", cmd_install_task, "注册登录自启计划任务（Windows 常驻）")
+    p.add_argument("--env", action="append", metavar="KEY=VALUE",
+                   help="写进 runner 的环境变量，可重复；与 config.json 的 env 合并后回写")
     add("uninstall-task", cmd_uninstall_task, "移除登录自启计划任务")
 
     args = ap.parse_args()
