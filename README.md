@@ -50,6 +50,15 @@ python scripts/wbctl.py probe --apply-ok      # 探出真能用的模型，只�
 
 Windows 也可以直接双击 `bin\wb-proxy.cmd`。
 
+## 作为 WorkBuddy 技能安装
+
+```bash
+git clone https://github.com/icdi24/wb-proxy.git ~/.workbuddy/skills/wb-proxy
+```
+
+装好后，在 WorkBuddy 里说「用 WorkBuddy 的额度跑 dsh」「wb-proxy 起一下」就会自动命中这个技能；
+更新只需在技能目录里 `git pull && python scripts/wbctl.py upgrade`。
+
 ## 它解决过的两个坑
 
 | 坑 | 表现 | 本项目的处理 |
