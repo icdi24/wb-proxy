@@ -1,0 +1,8 @@
+# 统一行尾，避免 Windows 上 checkout 破坏 shell 脚本
+* text=auto eol=lf
+
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.sh  text eol=lf
+*.py  text eol=lf

@@ -1,0 +1,25 @@
+# 运行时数据（绝不入库）
+accounts/
+usage/
+logs/
+config.json
+*.log
+*.pid
+probe-ok.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地临时文件
+*.tmp
+*.bak
