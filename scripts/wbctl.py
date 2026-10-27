@@ -39,6 +39,9 @@ PIDFILE = HOME / "gateway.pid"
 CONF = HOME / "config.json"
 STAMP = HUB / ".wb-skill-stamp"
 DEFAULT_PORT = 8788
+#: 登录自启的计划任务名（install-task / uninstall-task）。纯 ASCII，避免计划
+#: 任务在中文 Windows 上的编码问题。
+TASK_NAME = "wb-proxy-gateway"
 
 # 本机回环请求必须绕开系统/环境代理，否则会被 http_proxy 劫持成 502。
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -189,14 +192,22 @@ def cmd_doctor(args):
     out("网关健康      : %s" % ("在线 " + json.dumps({"realm": h.get("realm"), "accounts": h.get("accounts")}, ensure_ascii=False) if h else "未运行"))
     if sys.version_info < (3, 9):
         out("[!] 需要 Python 3.9+（网关本身要求不高，脚本用了 3.9 的语法）")
-    # 桌面客户端凭据
+    # 桌面客户端凭据。顺序必须和网关内 wb_atrest.CONFIG_DIR_CANDIDATES 一致：
+    # ~/.workbuddy-ai 优先于 ~/.workbuddy。两个都存在时只有前者生效，所以这里
+    # 要把「真正生效的那个」点明 —— 否则排障时很容易盯着另一份副本看。
     candidates = [
+        Path.home() / ".workbuddy-ai" / "keyblob",
+        Path.home() / ".workbuddy" / "keyblob",
         Path(os.environ.get("APPDATA", "")) / "WorkBuddy AI" / "keyblob",
         Path(os.environ.get("APPDATA", "")) / "workbuddy-ai" / "keyblob",
-        Path.home() / ".workbuddy" / "keyblob",
     ]
-    found = [str(p) for p in candidates if p.is_file()]
-    out("桌面 keyblob  : %s" % (found[0] if found else "未找到（导入账号前需要先登录桌面客户端）"))
+    found = [p for p in candidates if p.is_file()]
+    if found:
+        out("桌面 keyblob  : %s（生效）" % found[0])
+        for extra in found[1:]:
+            out("                %s（未使用，优先级更低）" % extra)
+    else:
+        out("桌面 keyblob  : 未找到（导入账号前需要先登录桌面客户端）")
     out("")
     out("下一步：python wbctl.py start")
 
@@ -550,6 +561,138 @@ def cmd_logs(args):
     out("\n".join(lines))
 
 
+# --------------------------------------------------------------------------- 常驻
+
+def _runner_path() -> Path:
+    """计划任务真正执行的那个 .cmd。
+
+    单独落一个文件，而不是把 python 命令行塞进 schtasks 的 /tr：/tr 里既要
+    转义引号又要带重定向，几乎必错；写进 .cmd 后所有引号问题由 cmd 自己消化。
+    """
+    return HOME / "start-gateway.cmd"
+
+
+def _run_quiet(argv, timeout=60):
+    """跑一个系统命令，返回 (returncode, 合并后的输出文本)。
+
+    输出按 mbcs 解码：中文 Windows 上 schtasks 的提示是 GBK，用 utf-8 会炸。
+    启动失败（而不是返回非零）也要收成返回值：安全软件拦下 schtasks 时抛的是
+    PermissionError，直接把堆栈抛给用户毫无意义。
+    """
+    try:
+        r = subprocess.run(argv, capture_output=True, timeout=timeout)
+    except OSError as exc:
+        return 127, "无法执行 %s：%s" % (argv[0], exc)
+    raw = (r.stdout or b"") + (r.stderr or b"")
+    try:
+        text = raw.decode("mbcs", "replace")
+    except Exception:
+        text = raw.decode("utf-8", "replace")
+    return r.returncode, text.strip()
+
+
+def _wait_ready(port: int, seconds: int = 90) -> bool:
+    deadline = time.time() + seconds
+    note = 0.0
+    while time.time() < deadline:
+        if health(port):
+            return True
+        if time.time() - note > 10:
+            note = time.time()
+            out("    …等待网关就绪")
+        time.sleep(1.0)
+    return False
+
+
+def cmd_install_task(args):
+    """把网关注册成 Windows「登录时启动」的计划任务。
+
+    为什么需要它：`start` 用 DETACHED_PROCESS 起网关，这在普通双击场景够用，
+    但只要父进程处在 Job Object 里（IDE 内建终端、CI、各类沙箱 shell），子进程
+    仍属于该作业，父进程一退出就被一并回收。症状很迷惑人：`start` 明明打印
+    「网关就绪」，下一条命令却报「网关未运行」。计划任务由任务计划程序直接
+    拉起，不在任何 shell 的作业里，因此不受影响，重启后也能自动恢复。
+    """
+    if os.name != "nt":
+        die("install-task 目前只支持 Windows。\n"
+            "  macOS：写 launchd plist，ProgramArguments 指向\n"
+            "         %s %s\n"
+            "  Linux：写 systemd --user 单元，ExecStart 同上"
+            % (sys.executable, HUB / "wb_proxy.py"))
+    port = conf_port(args.port)
+    ensure_hub(verbose=False)
+    conf = load_conf()
+    if args.port:
+        conf["port"] = int(port)
+        save_conf(conf)
+
+    exe = sys.executable
+    pw = Path(exe).with_name("pythonw.exe")
+    if pw.is_file():
+        exe = str(pw)                    # 无控制台窗口，输出靠下面重定向
+    LOGDIR.mkdir(parents=True, exist_ok=True)
+
+    argv = [exe, str(HUB / "wb_proxy.py"), "--host", "127.0.0.1", "--port", str(port)]
+    # 只把确实配置过的开关写进去：config.json 不存在时不要凭空造一个空 api_key。
+    if conf.get("api_key"):
+        argv += ["--api-key", str(conf["api_key"])]
+    if conf.get("panel_password"):
+        argv += ["--panel-password", str(conf["panel_password"])]
+
+    runner = _runner_path()
+    logfile = LOGDIR / "gateway.log"
+    runner.write_text("\r\n".join([
+        "@echo off",
+        "rem 由 wbctl.py install-task 生成；登录时计划任务 %s 调用本文件。" % TASK_NAME,
+        "rem 改这里不会生效 —— 改 wbctl.py 后重新 install-task。",
+        'cd /d "%s"' % HUB,
+        '"%s" >> "%s" 2>&1' % ('" "'.join(argv), logfile),
+    ]) + "\r\n", encoding="utf-8")
+    out("[*] 启动脚本：%s" % runner)
+    out("[*] 日志追加：%s" % logfile)
+    if conf.get("api_key"):
+        out("[!] config.json 里配了 api_key，它会被明文写进上面这个 .cmd（同目录，风险等同 accounts/）")
+
+    code, msg = _run_quiet(["schtasks", "/create", "/tn", TASK_NAME,
+                            "/tr", '"%s"' % runner, "/sc", "onlogon", "/f"])
+    if code != 0:
+        die("注册计划任务失败：%s\n  （schtasks 可能被安全策略拦截，可用 PowerShell 的 "
+            "Register-ScheduledTask 手工注册，动作指向上面那个 .cmd）" % msg)
+    out("[ok] 已注册计划任务 %s（登录时自动启动）" % TASK_NAME)
+
+    if health(port):
+        out("[=] 网关已在 %d 端口运行，无需重复启动" % port)
+    else:
+        code, msg = _run_quiet(["schtasks", "/run", "/tn", TASK_NAME])
+        if code != 0:
+            die("任务已注册但启动失败：%s" % msg)
+        if not _wait_ready(port):
+            die("任务已启动，但网关 90 秒内没就绪，看日志：%s" % logfile)
+        out("[ok] 网关已由计划任务拉起，端口 %d" % port)
+    h = health(port) or {}
+    out("     OpenAI 兼容地址：http://127.0.0.1:%d/v1   面板：http://127.0.0.1:%d/"
+        % (port, port))
+    out("     账号 %s/%s，出口 %s" % (h.get("accounts_ready"), h.get("accounts"), h.get("realm")))
+
+
+def cmd_uninstall_task(args):
+    if os.name != "nt":
+        die("uninstall-task 目前只支持 Windows")
+    code, msg = _run_quiet(["schtasks", "/delete", "/tn", TASK_NAME, "/f"])
+    if code != 0:
+        out("[=] 没找到计划任务 %s（可能没装过）" % TASK_NAME)
+    else:
+        out("[ok] 已删除计划任务 %s" % TASK_NAME)
+    runner = _runner_path()
+    if runner.is_file():
+        try:
+            runner.unlink()
+            out("[ok] 已删除启动脚本 %s" % runner)
+        except Exception as exc:
+            out("[!] 启动脚本删不掉：%s" % exc)
+    out("[i] 已经跑起来的网关进程不受影响，要停请用：python wbctl.py stop")
+
+
 def cmd_upgrade(args):
     ensure_hub(verbose=False)
     STAMP.unlink(missing_ok=True)
@@ -598,6 +741,8 @@ def main():
     p = add("logs", cmd_logs, "看网关日志")
     p.add_argument("--lines", type=int, default=40)
     add("upgrade", cmd_upgrade, "同步 upstream 到运行目录")
+    add("install-task", cmd_install_task, "注册登录自启计划任务（Windows 常驻）")
+    add("uninstall-task", cmd_uninstall_task, "移除登录自启计划任务")
 
     args = ap.parse_args()
     if not getattr(args, "fn", None):

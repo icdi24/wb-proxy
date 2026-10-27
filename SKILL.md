@@ -32,6 +32,26 @@ python scripts/wbctl.py selftest        # 端到端自检（真发一次对话�
 
 Windows 用户也可以直接双击 `bin/wb-proxy.cmd`（等价于 `start`）。
 
+### 想让网关一直活着？
+
+`start` 起的网关在普通双击场景够用，但如果它是在 IDE 内建终端、CI、沙箱 shell
+里被拉起来的，父进程一退，网关会被**一并回收** —— 症状很迷惑人：`start` 明明确认
+「网关就绪」，下一条命令却报「网关未运行」。
+
+Windows 上用计划任务常驻，重启后也会自动恢复：
+
+```bash
+python scripts/wbctl.py install-task      # 注册「登录时启动」+ 立即拉起
+python scripts/wbctl.py uninstall-task    # 撤销
+```
+
+它会生成 `~/.wb-proxy/start-gateway.cmd`（真正的启动脚本，日志重定向到
+`~/.wb-proxy/logs/gateway.log`），再注册计划任务 `wb-proxy-gateway` 指向它。
+计划任务由任务计划程序直接拉起，不在任何 shell 的作业里，因此不会被回收。
+
+> 若 `schtasks` 被安全软件拦截，脚本会提示改用 PowerShell 的
+> `Register-ScheduledTask`，动作指向那个 `.cmd` 即可。
+
 ---
 
 ## 目录约定（重要）
@@ -62,6 +82,8 @@ Windows 用户也可以直接双击 `bin/wb-proxy.cmd`（等价于 `start`）。
 | `selftest` | 健康 + 模型目录 + 真对话 | `--model` |
 | `logs` | 看网关日志尾部 | `--lines` |
 | `upgrade` | 把 `upstream/` 新版本同步到运行目录 | |
+| `install-task` | 注册 Windows「登录时启动」计划任务并立即拉起（常驻） | `--port` |
+| `uninstall-task` | 删除计划任务与启动脚本（不停已经跑起来的进程） | |
 
 支持的客户端（`apply --client`）：`dsh`、`claude-code`、`codex`、`opencode`、`crush`、`zcode`。
 先 `apply --list` 看哪些已安装 —— 它会同时打印每个客户端的配置文件路径。
@@ -122,6 +144,32 @@ python scripts/two_exits.py --dry-run  # 只看要写什么
 
 ---
 
+## 换账号
+
+网关存的是**账号凭据的副本**（`~/.wb-proxy/hub/accounts/<uid>.json`），不是对桌面
+客户端登录态的实时引用。所以换号 / 重新登录之后，补一条命令即可：
+
+```bash
+# 前提：桌面客户端已登录新账号，并且正在运行（密钥只从进程内存里取）
+python scripts/wbctl.py import
+```
+
+- **客户端侧什么都不用改** —— baseURL 和模型清单与账号无关，dsh 等客户端也不用重启。
+- 同一个 uid 重新登录 = 原位替换 token，积分 / 签到 / 档位记录都保留。
+- **换了 uid 是新增一条，旧账号不会自动删除。** 旧号 token 失效后会持续失败，建议清掉：
+  面板上删，或 `rm ~/.wb-proxy/hub/accounts/<旧uid>.json`。
+  留着也并非没有好处 —— 多号额度叠加、轮询分摊，限流的模型会自动跳过它。
+
+> 限流（`429 / code 6004 usage exceeds frequency limit`）是**账号级**的，换号立刻绕过。
+> 但 `gpt-*`、`gemini-*`、`grok-4.7` 的 `503 no usable account` 是**账号档位**问题
+> （非 PRO 拿不到），换号解决不了。
+
+**密钥只存在内存里、不落盘。** 网关进程重启过（含关机重开）之后，`import` 必须先让
+桌面客户端运行起来 —— 它是密钥的唯一来源。这不影响已有账号的日常对话：续期用的是
+`refreshToken`，不需要那个静态密钥。
+
+---
+
 ## 排查顺序
 
 按这个顺序看，能命中 95% 的问题：
@@ -157,6 +205,7 @@ python scripts/wbctl.py probe --models <出问题的模型>
 ## 卸载
 
 ```bash
+python scripts/wbctl.py uninstall-task   # 装过计划任务的话先撤，否则登录时还会被拉起
 python scripts/wbctl.py stop
 rm -rf ~/.wb-proxy            # 运行目录 + 账号 + 日志
 ```

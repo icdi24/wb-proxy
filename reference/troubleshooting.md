@@ -20,6 +20,8 @@ python scripts/wbctl.py probe --models <出问题的模型>
 | `网关 90 秒内没起来` | 首启动在初始化目录/拉模型目录；或 Python 太旧 | 看 `~/.wb-proxy/logs/gateway.log`；确认 Python ≥ 3.9 |
 | 起完 `账号 0/0` | 还没导号 | 跑 `import` |
 | 双击 `bin\wb-proxy.cmd` 一闪而过 | 脚本报错退出 | 打开 cmd 手动执行 `python scripts\wbctl.py start` 看输出 |
+| `start` 说「网关就绪」，下一条命令却说「网关未运行」 | 网关被父进程的 Job Object 连带回收（IDE 内建终端 / CI / 沙箱 shell 常见） | `python scripts/wbctl.py install-task` 改用计划任务常驻；日志在 `~/.wb-proxy/logs/gateway.log` |
+| `install-task` 报「拒绝访问」/ 找不到 schtasks | 安全软件拦截了 `schtasks.exe` | 用 PowerShell `Register-ScheduledTask`，动作指向 `~/.wb-proxy/start-gateway.cmd` |
 
 ## 导入账号
 
@@ -29,11 +31,16 @@ python scripts/wbctl.py probe --models <出问题的模型>
 | 导入 0 个账号 | 客户端从没登录过，或凭据文件已被清理 | 在客户端里正常发一条消息，让它落盘凭据，再 `import` |
 | 导入成功但对话 401 | token 过期、refresh 失败 | `status --refresh`；仍失败就重登客户端再 `import` |
 | 积分显示 `-` | 只导了号没刷积分 | `status --refresh`（或面板点「刷新积分」） |
+| 换了账号，网关还在用旧号 | 网关存的是凭据副本，不跟随客户端登录态 | 客户端登录新号并保持运行，重跑 `import`（详见 SKILL.md「换账号」） |
+| 换号后 `status` 里多出一个账号 | 换了 uid 会新增，旧号不会自动删 | 删 `~/.wb-proxy/hub/accounts/<旧uid>.json`，或面板删 |
+| 网关重启后 `import` 报密钥失败 | at-rest 密钥只存内存，重启即丢 | 先启动并登录桌面客户端，再 `import`；不影响已有账号日常对话 |
+| `doctor` 显示的 keyblob 和实际用的不是同一个 | 两份都在时 `.workbuddy-ai` 优先于 `.workbuddy` | `doctor` 会标出「（生效）」的那个，以它为准 |
 
 ## 对话阶段
 
 | 现象 | 含义 | 处理 |
 |---|---|---|
+| `429 code 6004 usage exceeds frequency limit` | 该账号对这个模型的**当日额度**用完（不是并发限流） | 换模型（`probe`），或换账号 —— 限流是账号级的，换号立刻生效；响应里的 `retry_after` 就是距重置的秒数 |
 | `503 no usable account for realm 'intl': all are disabled, cooling down, exhausted` | 该出口账号全被冷却/限额/禁用，或该模型只给 PRO | 换个账号出口，或 `probe` 找能用模型；PRO 专属模型（`gpt-*`/`gemini-*`）在免费号上必然如此 |
 | `400 模型 X 只在国内版提供，但…绑定的是国际版出口` | 模型与出口不匹配 | 切出口（见 SKILL.md「出口」一节），或换等价模型 |
 | `400 模型 X 只在国际版提供…` | 反向不匹配，同上 | 同上 |
